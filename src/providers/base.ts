@@ -42,7 +42,9 @@ export abstract class BaseProvider implements IProvider {
     try {
       this.logger.debug(`Searching for query: ${query}`);
       const results = await this.searchInternal(query);
-      globalCache.set(cacheKey, results, 180);
+      if (results && results.length > 0) {
+        globalCache.set(cacheKey, results, 180);
+      }
       return results;
     } catch (err) {
       this.logger.error(`Search error for "${query}": ${(err as Error).message}`);
@@ -60,7 +62,9 @@ export abstract class BaseProvider implements IProvider {
     try {
       this.logger.debug(`Fetching catalog type=${type} page=${page}`);
       const results = await this.getCatalogInternal(type, page);
-      globalCache.set(cacheKey, results, 300);
+      if (results && results.length > 0) {
+        globalCache.set(cacheKey, results, 300);
+      }
       return results;
     } catch (err) {
       this.logger.error(`Catalog error for type ${type} page ${page}: ${(err as Error).message}`);
