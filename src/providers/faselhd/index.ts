@@ -1,3 +1,4 @@
+import vm from 'node:vm';
 import { BaseProvider } from '../base.js';
 import { ProviderDetail, ProviderEpisode, ProviderItem, ResolvedStream } from '../../types/provider.js';
 import { StremioContentType } from '../../types/stremio.js';
@@ -8,8 +9,8 @@ export class FaselhdProvider extends BaseProvider {
   id = 'faselhd';
   name = 'FaselHD (فاصل إعلاني)';
   lang = 'ar';
-  mainUrl = 'https://www.faselhd.ac';
-  supportedTypes: StremioContentType[] = ['movie', 'series'];
+  mainUrl = 'https://www.faselhd.pro';
+  supportedTypes: StremioContentType[] = ['movie', 'series', 'anime'];
 
   constructor() {
     super();
@@ -53,11 +54,9 @@ export class FaselhdProvider extends BaseProvider {
   }
 
   async getCatalogInternal(type: StremioContentType, page: number = 1): Promise<ProviderItem[]> {
-    const path = type === 'series' ? 'series' : 'movies';
-    const url = `${this.mainUrl}/${path}/page/${page}`;
-    const resp = await http.get(url, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const path = type === 'anime' ? 'anime' : (type === 'series' ? 'series' : 'movies');
+    const url = `${this.mainUrl}/${path}${page > 1 ? `/page/${page}` : ''}`;
+    const resp = await http.get(url);
 
     const items: ProviderItem[] = [];
     resp.$('div.postDiv').each((_, el) => {
@@ -83,9 +82,7 @@ export class FaselhdProvider extends BaseProvider {
 
   async getMetaInternal(contentId: string, type: StremioContentType): Promise<ProviderDetail | null> {
     const fullUrl = this.fixUrl(contentId);
-    const resp = await http.get(fullUrl, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const resp = await http.get(fullUrl);
 
     const title = resp.$('h1.title').text().trim() || resp.$('meta[property="og:title"]').attr('content') || 'FaselHD Title';
     const poster = this.fixUrl(resp.$('.posterImg img').attr('src') || resp.$('meta[property="og:image"]').attr('content'));
@@ -127,27 +124,77 @@ export class FaselhdProvider extends BaseProvider {
   async getStreamsInternal(contentId: string, _type: StremioContentType, episodeId?: string): Promise<ResolvedStream[]> {
     const targetPath = episodeId || contentId;
     const fullUrl = this.fixUrl(targetPath);
-    const resp = await http.get(fullUrl, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const resp = await http.get(fullUrl);
 
     const streams: ResolvedStream[] = [];
-    const iframeSrc = resp.$('iframe[src*="player"], iframe[src*="fasel"]').attr('src');
-    if (iframeSrc) {
-      const extracted = await extractStreams(this.fixUrl(iframeSrc), fullUrl);
-      streams.push(...extracted);
+
+    // 1. Direct FaselHD player token extraction from iframe[name="player_iframe"] or data-src
+    const playerIframe = resp.$('iframe[name="player_iframe"], iframe[data-src*="player"], iframe[src*="player"]');
+    const playerUrl = playerIframe.attr('data-src') || playerIframe.attr('src');
+
+    if (playerUrl) {
+      try {
+        const fullPlayerUrl = this.fixUrl(playerUrl);
+        const playerRes = await http.get(fullPlayerUrl, { headers: { Referer: fullUrl } });
+
+        const ctx = {
+          window: {},
+          document: { getElementById: () => ({}) },
+          navigator: { userAgent: 'Mozilla/5.0' },
+          jwplayer: () => ({
+            setup: (cfg: any) => {
+              if (cfg?.file) {
+                streams.push({
+                  name: 'FaselHD Main (HLS)',
+                  quality: '1080p / 720p',
+                  url: cfg.file,
+                  isM3u8: cfg.file.includes('.m3u8'),
+                  headers: { Referer: fullPlayerUrl },
+                });
+              }
+              if (Array.isArray(cfg?.sources)) {
+                for (const s of cfg.sources) {
+                  if (s.file) {
+                    streams.push({
+                      name: `FaselHD ${s.label || 'Direct'}`,
+                      quality: s.label || '1080p',
+                      url: s.file,
+                      isM3u8: s.file.includes('.m3u8'),
+                      headers: { Referer: fullPlayerUrl },
+                    });
+                  }
+                }
+              }
+            },
+            on: () => {},
+          }),
+        };
+        vm.createContext(ctx);
+        const scripts = playerRes.$('script').map((_, s) => playerRes.$(s).text()).get();
+        for (const sc of scripts) {
+          if (sc.includes('jwplayer') || sc.includes('sources') || sc.includes('eval')) {
+            try {
+              vm.runInContext(sc, ctx, { timeout: 2000 });
+            } catch {}
+          }
+        }
+      } catch (err) {
+        this.logger.debug(`Error resolving FaselHD player token: ${(err as Error).message}`);
+      }
     }
 
-    // Check server buttons
+    // 2. Check server buttons and alternative iframes
     const serverLinks: string[] = [];
-    resp.$('#show-servers-list button, ul.serversList li button').each((_, btn) => {
+    resp.$('#show-servers-list button, ul.serversList li button, .buttonsList button').each((_, btn) => {
       const dataHref = resp.$(btn).attr('data-href') || resp.$(btn).attr('onclick')?.match(/https?:\/\/[^'"]+/)?.[0];
       if (dataHref) serverLinks.push(this.fixUrl(dataHref));
     });
 
     for (const sUrl of serverLinks) {
-      const extracted = await extractStreams(sUrl, fullUrl);
-      streams.push(...extracted);
+      try {
+        const extracted = await extractStreams(sUrl, fullUrl);
+        streams.push(...extracted);
+      } catch {}
     }
 
     return streams;
