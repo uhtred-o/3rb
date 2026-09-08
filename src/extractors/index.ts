@@ -95,6 +95,21 @@ export async function extractStreams(url: string, referer?: string): Promise<Res
     // Try packer if present
     if (html.includes('eval(function(p,a,c,k,e,d)')) {
       const unpacked = unpackAll(html, url);
+
+      // 1. Mixdrop pattern (MDCore.wurl)
+      const mdMatch = unpacked.match(/MDCore\.(?:wurl|wsrc)\s*=\s*["']([^"']+)["']/i);
+      if (mdMatch) {
+        let fileUrl = mdMatch[1];
+        if (fileUrl.startsWith('//')) fileUrl = `https:${fileUrl}`;
+        streams.push({
+          name: 'Mixdrop Direct',
+          url: fileUrl,
+          isM3u8: fileUrl.includes('.m3u8'),
+          headers: { Referer: url },
+        });
+      }
+
+      // 2. Unpacked HLS m3u8
       const unpackedHls = unpacked.match(/https?:\/\/[^'"\s\\]+?\.m3u8[^'"\s\\]*/g);
       if (unpackedHls) {
         for (const m of unpackedHls) {
@@ -102,6 +117,19 @@ export async function extractStreams(url: string, referer?: string): Promise<Res
             name: 'Unpacked HLS',
             url: m.replace(/\\\//g, '/'),
             isM3u8: true,
+            headers: { Referer: url },
+          });
+        }
+      }
+
+      // 3. Unpacked MP4
+      const unpackedMp4 = unpacked.match(/https?:\/\/[^'"\s\\]+?\.mp4[^'"\s\\]*/g);
+      if (unpackedMp4) {
+        for (const m of unpackedMp4) {
+          streams.push({
+            name: 'Unpacked Video',
+            url: m.replace(/\\\//g, '/'),
+            isM3u8: false,
             headers: { Referer: url },
           });
         }
