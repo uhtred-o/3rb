@@ -68,20 +68,26 @@ export class ThreeIskProvider extends BaseProvider {
   }
 
   async getCatalogInternal(type: StremioContentType, page: number = 1): Promise<ProviderItem[]> {
-    const path = type === 'movie' ? 'movies' : 'series';
-    const url = `${this.mainUrl}/${path}/page/${page}`;
+    const path = type === 'movie' ? 'w-mvs' : 'w-srs';
+    const url = `${this.mainUrl}/${path}/${page > 1 ? `page/${page}/` : ''}`;
     const resp = await http.get(url, {
       headers: { 'User-Agent': MOBILE_USER_AGENT },
     });
 
     const items: ProviderItem[] = [];
-    resp.$('div.post-item, div.block-post, div.video-item').each((_, el) => {
-      const a = resp.$(el).find('a').first();
-      const title = resp.$(el).find('.post-title, .title').text().trim() || a.attr('title') || '';
-      const href = this.extractItemUrl(el, resp.$);
-      if (!title || !href) return;
+    const seenHrefs = new Set<string>();
 
-      const poster = this.fixUrl(resp.$(el).find('img').attr('data-src') || resp.$(el).find('img').attr('src'));
+    resp.$('a[href*="/serie-"], a[href*="/tvshows/"], div.post-item, div.block-post').each((_, el) => {
+      const a = resp.$(el).is('a') ? resp.$(el) : resp.$(el).find('a').first();
+      const rawTitle = resp.$(el).find('.post-title, .title').text().trim() || a.text().trim() || a.attr('title') || '';
+      const title = rawTitle.replace(/\s+/g, ' ').trim();
+      const href = a.attr('href');
+      if (!title || !href || seenHrefs.has(href)) return;
+      seenHrefs.add(href);
+
+      const poster = this.fixUrl(
+        resp.$(el).find('img').attr('data-src') || resp.$(el).find('img').attr('src') || a.find('img').attr('src')
+      );
 
       items.push({
         id: this.formatId(href.replace(this.mainUrl, '')),
