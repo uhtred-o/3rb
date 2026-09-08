@@ -1,7 +1,7 @@
 import { BaseProvider } from '../base.js';
 import { ProviderDetail, ProviderEpisode, ProviderItem, ResolvedStream } from '../../types/provider.js';
 import { StremioContentType } from '../../types/stremio.js';
-import { http, MOBILE_USER_AGENT } from '../../utils/http.js';
+import { http } from '../../utils/http.js';
 import { safeBase64Decode } from '../../utils/crypto.js';
 import { unpackAll } from '../../utils/packer.js';
 import { extractStreams } from '../../extractors/index.js';
@@ -40,9 +40,7 @@ export class ThreeIskProvider extends BaseProvider {
 
   async searchInternal(query: string): Promise<ProviderItem[]> {
     const url = `${this.mainUrl}/search.php?keywords=${encodeURIComponent(query)}`;
-    const resp = await http.get(url, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const resp = await http.get(url);
 
     const items: ProviderItem[] = [];
     resp.$('div.post-item, div.block-post, div.video-item').each((_, el) => {
@@ -70,9 +68,7 @@ export class ThreeIskProvider extends BaseProvider {
   async getCatalogInternal(type: StremioContentType, page: number = 1): Promise<ProviderItem[]> {
     const path = type === 'movie' ? 'w-mvs' : 'w-srs';
     const url = `${this.mainUrl}/${path}/${page > 1 ? `page/${page}/` : ''}`;
-    const resp = await http.get(url, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const resp = await http.get(url);
 
     const items: ProviderItem[] = [];
     const seenHrefs = new Set<string>();
@@ -104,9 +100,7 @@ export class ThreeIskProvider extends BaseProvider {
 
   async getMetaInternal(contentId: string, type: StremioContentType): Promise<ProviderDetail | null> {
     const fullUrl = this.fixUrl(contentId);
-    const resp = await http.get(fullUrl, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const resp = await http.get(fullUrl);
 
     const title = resp.$('h1.entry-title, .post-title').text().trim() || resp.$('meta[property="og:title"]').attr('content') || '3isk Title';
     const poster = this.fixUrl(resp.$('.post-thumbnail img').attr('src') || resp.$('meta[property="og:image"]').attr('content'));
@@ -147,89 +141,131 @@ export class ThreeIskProvider extends BaseProvider {
   async getStreamsInternal(contentId: string, _type: StremioContentType, episodeId?: string): Promise<ResolvedStream[]> {
     const targetPath = episodeId || contentId;
     const fullUrl = this.fixUrl(targetPath);
-    const resp = await http.get(fullUrl, {
-      headers: { 'User-Agent': MOBILE_USER_AGENT },
-    });
+    const resp = await http.get(fullUrl);
 
     const streams: ResolvedStream[] = [];
 
-    // Stage 1: Form search
-    const form = resp.$('form[action*="watch"], form[action*="3isk"], form:has(button.single-watch-btn)').first();
-    let actionUrl = form.attr('action') || fullUrl;
-    actionUrl = this.fixUrl(actionUrl);
+    // Stage 1: Find the 3isk form with news token
+    const form = resp.$('form:has(input[name="news"])').first();
+    const actionUrl = form.attr('action') || resp.$('form[action*="aa.3isk.icu"]').first().attr('action');
+    const newsVal = form.find('input[name="news"]').attr('value') || '';
+    const uVal = form.find('input[name="u"]').attr('value') || '';
 
-    const formData: Record<string, string> = {};
-    form.find('input[type="hidden"]').each((_, input) => {
-      const name = resp.$(input).attr('name');
-      const val = resp.$(input).attr('value') || '';
-      if (name) formData[name] = val;
-    });
-
-    const watchBtn = form.find('button.single-watch-btn, input[type="submit"]').first();
-    const btnName = watchBtn.attr('name') || 'watch';
-    const btnVal = watchBtn.attr('value') || '1';
-    formData[btnName] = btnVal;
-
-    try {
-      const stage1Resp = await http.post(actionUrl, {
-        form: formData,
-        headers: { 'User-Agent': MOBILE_USER_AGENT, Referer: fullUrl },
-      });
-
-      const stage1Html = stage1Resp.text;
-      const myUrlMatch = stage1Html.match(/var\s+myUrl\s*=\s*['"]([^'"]+)['"]/);
-      const newsMatch = stage1Html.match(/myInput\.value\s*=\s*['"]([^'"]+)['"]/);
-
-      if (myUrlMatch && newsMatch) {
-        const stage2Url = this.fixUrl(myUrlMatch[1]);
-        const newsVal = newsMatch[1];
-
-        const stage2Resp = await http.post(stage2Url, {
-          form: { news: newsVal, u: '', submit: 'submit' },
-          headers: { 'User-Agent': MOBILE_USER_AGENT, Referer: actionUrl },
+    if (actionUrl && newsVal) {
+      try {
+        // Submit step 1 to aa.3isk.icu
+        const step2Resp = await http.post(this.fixUrl(actionUrl), {
+          form: { news: newsVal, u: uVal },
+          headers: { Referer: fullUrl },
         });
 
-        // Stage 2 embed servers rotation
-        const baseEmbedMatch = stage2Resp.text.match(/https?:\/\/[^'"]+\/embed\/(\d+)\/([^'"\s]+)/);
-        if (baseEmbedMatch) {
-          const trailingPart = baseEmbedMatch[2];
-          for (let s = 1; s <= 4; s++) {
-            const serverEmbedUrl = `${this.mainUrl}/embed/${s}/${trailingPart}`;
+        // Step 2 contains myUrl and myInput.value
+        const myUrlMatch = step2Resp.text.match(/var\s+myUrl\s*=\s*['"]([^'"]+)['"]/);
+        const nextNewsMatch = step2Resp.text.match(/myInput\.value\s*=\s*['"]([^'"]+)['"]/);
+
+        if (myUrlMatch && nextNewsMatch) {
+          const step3Url = this.fixUrl(myUrlMatch[1]);
+          const step3News = nextNewsMatch[1];
+
+          // Submit step 2
+          const step3Resp = await http.post(step3Url, {
+            form: { news: step3News, u: '' },
+            headers: { Referer: actionUrl },
+          });
+
+          // Step 3 yields embed iframes (e.g. https://3iskk.xyz/embed/1/264367/2/ or ukrcdn.club/e/...)
+          const embedUrls: string[] = [];
+          step3Resp.$('iframe[src*="embed"], iframe[src*="3isk"]').each((_, ifr) => {
+            const src = step3Resp.$(ifr).attr('src');
+            if (src) embedUrls.push(this.fixUrl(src));
+          });
+
+          // Also scan text for direct embed urls
+          const textEmbeds = step3Resp.text.match(/https?:\/\/[^'"\s<>]+\/embed\/[^'"\s<>]+/g) || [];
+          for (const u of textEmbeds) {
+            if (!embedUrls.includes(u)) embedUrls.push(u);
+          }
+
+          for (const embedUrl of embedUrls) {
             try {
-              const embedResp = await http.get(serverEmbedUrl, {
-                headers: { Referer: stage2Url },
+              const embedResp = await http.get(embedUrl, {
+                headers: { Referer: step3Url },
               });
-              const unpacked = unpackAll(embedResp.text, serverEmbedUrl);
+
+              // Check if embed contains nested ukrcdn iframe or direct video
+              const ukrcdnIfr = embedResp.$('iframe[src*="ukrcdn"]').attr('src') ||
+                embedResp.text.match(/https?:\/\/ukrcdn\.[a-z]+\/e\/[a-zA-Z0-9-]+/)?.[0];
+
+              if (ukrcdnIfr) {
+                const ukrUrl = this.fixUrl(ukrcdnIfr);
+                const ukrResp = await http.get(ukrUrl, {
+                  headers: { Referer: embedUrl },
+                });
+
+                // Extract fetch(".../playback?g=...")
+                const playbackApiMatch = ukrResp.text.match(/fetch\s*\(\s*['"]([^'"]+playback[^'"]*)['"]/);
+                if (playbackApiMatch) {
+                  const playbackUrl = playbackApiMatch[1].replace(/\\\//g, '/');
+                  const pbResp = await http.get(playbackUrl, {
+                    headers: {
+                      Referer: ukrUrl,
+                      Accept: 'application/json',
+                    },
+                  });
+                  try {
+                    const pbJson = JSON.parse(pbResp.text);
+                    if (pbJson.url) {
+                      streams.push({
+                        name: '3isk - سيرفر قصة عشق (HLS)',
+                        quality: '1080p / 720p',
+                        url: pbJson.url,
+                        isM3u8: true,
+                        headers: { Referer: 'https://ukrcdn.club/' },
+                      });
+                    }
+                  } catch (e) {
+                    this.logger.debug(`Error parsing ukrcdn playback JSON: ${(e as Error).message}`);
+                  }
+                }
+              }
+
+              // Also check for any unpacked m3u8/mp4
+              const unpacked = unpackAll(embedResp.text, embedUrl);
               const m3u8Match = unpacked.match(/https?:\/\/[^'"\s\\]+?\.m3u8[^'"\s\\]*/);
               if (m3u8Match) {
                 streams.push({
-                  name: `3isk Server ${s}`,
+                  name: '3isk Server',
                   url: m3u8Match[0].replace(/\\\//g, '/'),
                   isM3u8: true,
-                  headers: { Referer: serverEmbedUrl },
+                  headers: { Referer: embedUrl },
                 });
               }
-            } catch {
-              continue;
+            } catch (err) {
+              this.logger.debug(`Error fetching embed ${embedUrl}: ${(err as Error).message}`);
             }
           }
         }
+      } catch (err) {
+        this.logger.error(`Error during 3isk handshake: ${(err as Error).message}`);
       }
-    } catch (e) {
-      this.logger.debug(`Error during 3isk two-stage handshake: ${(e as Error).message}`);
     }
 
-    // Direct fallback extractors if stage handshake failed or returned few streams
+    // Direct fallback extractors from main episode page iframes
     if (streams.length === 0) {
-      resp.$('iframe[src*="embed"], iframe[src*="player"]').each((_, ifr) => {
+      const iframes: string[] = [];
+      resp.$('iframe[src]').each((_, ifr) => {
         const src = resp.$(ifr).attr('src');
-        if (src) {
-          serverLinksFallback.push(this.fixUrl(src));
-        }
+        if (src) iframes.push(this.fixUrl(src));
       });
+
+      for (const ifrUrl of iframes) {
+        try {
+          const extracted = await extractStreams(ifrUrl, fullUrl);
+          streams.push(...extracted);
+        } catch {}
+      }
     }
 
     return streams;
   }
 }
-const serverLinksFallback: string[] = [];
