@@ -2,14 +2,13 @@ import { BaseProvider } from '../base.js';
 import { ProviderDetail, ProviderItem, ResolvedStream } from '../../types/provider.js';
 import { StremioContentType } from '../../types/stremio.js';
 import { http } from '../../utils/http.js';
-import { safeBase64Decode } from '../../utils/crypto.js';
-import { extractStreams } from '../../extractors/index.js';
+import { decryptYacine } from '../../utils/crypto.js';
 
 export class SyriaLiveProvider extends BaseProvider {
   id = 'syrialive';
-  name = 'SyriaLive (مباريات وبث مباشر)';
+  name = 'SyriaLive (مباريات اليوم)';
   lang = 'ar';
-  mainUrl = 'https://www.syrlive.com';
+  mainUrl = 'https://def.ycnapi.com/api';
   supportedTypes: StremioContentType[] = ['tv', 'channel'];
 
   constructor() {
@@ -17,157 +16,158 @@ export class SyriaLiveProvider extends BaseProvider {
     this.initLogger();
   }
 
-  private fixUrl(url?: string): string {
-    if (!url) return '';
-    if (url.startsWith('//')) return `https:${url}`;
-    if (!url.startsWith('http')) return `${this.mainUrl}${url.startsWith('/') ? '' : '/'}${url}`;
-    return url;
+  private async fetchEvents(): Promise<any[]> {
+    try {
+      const resp = await http.get(`${this.mainUrl}/events`, {
+        headers: { 'User-Agent': 'okhttp/4.12.0' },
+        timeout: 6000,
+      });
+      if (resp.status === 200) {
+        const decrypted = decryptYacine(resp.text, resp.headers['t'] || '');
+        if (decrypted) {
+          return JSON.parse(decrypted).data || [];
+        }
+      }
+    } catch (e) {
+      this.logger.debug(`Error fetching match events: ${(e as Error).message}`);
+    }
+    return [];
   }
 
   async searchInternal(query: string): Promise<ProviderItem[]> {
-    const url = `${this.mainUrl}/?s=${encodeURIComponent(query)}`;
-    const resp = await http.get(url);
-    const items: ProviderItem[] = [];
+    const qLower = query.toLowerCase();
+    const events = await this.fetchEvents();
+    const results: ProviderItem[] = [];
 
-    resp.$('.AY-PItem').each((_, el) => {
-      const titleEl = resp.$(el).find('.AY-PostTitle a');
-      const title = titleEl.text().trim();
-      const href = titleEl.attr('href');
-      if (!title || !href) return;
+    for (const ev of events) {
+      const t1 = ev.team_1?.name || '';
+      const t2 = ev.team_2?.name || '';
+      const champ = ev.champions || '';
+      const matchTitle = `${t1} vs ${t2}`;
 
-      const poster = this.fixUrl(resp.$(el).find('img').attr('data-src') || resp.$(el).find('img').attr('src'));
-      items.push({
-        id: this.formatId(href.replace(this.mainUrl, '')),
-        provider: this.name,
-        type: 'tv',
-        title,
-        poster,
-        url: this.fixUrl(href),
-      });
-    });
+      if (
+        t1.toLowerCase().includes(qLower) ||
+        t2.toLowerCase().includes(qLower) ||
+        champ.toLowerCase().includes(qLower) ||
+        matchTitle.toLowerCase().includes(qLower)
+      ) {
+        const timeStr = ev.start_time
+          ? new Date(ev.start_time * 1000).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
+          : '';
 
-    return items;
+        results.push({
+          id: this.formatId(String(ev.id)),
+          provider: this.name,
+          type: 'tv',
+          title: `⚽ ${matchTitle} (${champ})`,
+          poster: ev.team_1?.logo || ev.team_2?.logo,
+          description: `🏆 البطولة: ${champ} | ⏰ ${timeStr} | 📺 ${ev.channel || 'بث مباشر'} | 🎙️ ${ev.commentary || ''}`,
+          url: `${this.mainUrl}/event/${ev.id}`,
+        });
+      }
+    }
+
+    return results;
   }
 
   async getCatalogInternal(_type: StremioContentType, _page: number = 1): Promise<ProviderItem[]> {
-    const resp = await http.get('https://d.syrlive.com/');
+    const events = await this.fetchEvents();
     const items: ProviderItem[] = [];
 
-    resp.$('.match-container').each((_, el) => {
-      const rightTeam = resp.$(el).find('.right-team .team-name').text().trim();
-      const leftTeam = resp.$(el).find('.left-team .team-name').text().trim();
-      const time = resp.$(el).find('.match-time').text().trim();
-      const result = resp.$(el).find('.result').text().trim() || 'VS';
-      const href = resp.$(el).find('a').attr('href');
-      if (!rightTeam || !leftTeam || !href) return;
-
-      const title = `${rightTeam} ${result} ${leftTeam} (${time})`;
-      const poster = this.fixUrl(
-        resp.$(el).find('.right-team img').attr('data-src') || resp.$(el).find('.right-team img').attr('src')
-      );
+    for (const ev of events) {
+      const t1 = ev.team_1?.name || 'فريق 1';
+      const t2 = ev.team_2?.name || 'فريق 2';
+      const champ = ev.champions || 'مباراة اليوم';
+      const timeStr = ev.start_time
+        ? new Date(ev.start_time * 1000).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
+        : '';
 
       items.push({
-        id: this.formatId(href.replace(this.mainUrl, '')),
+        id: this.formatId(String(ev.id)),
         provider: this.name,
         type: 'tv',
-        title,
-        poster,
-        description: `توقيت المباراة: ${time}`,
-        url: this.fixUrl(href),
+        title: `⚽ ${t1} vs ${t2} - ${champ}`,
+        poster: ev.team_1?.logo || ev.team_2?.logo,
+        description: `🏆 البطولة: ${champ} | ⏰ التوقيت: ${timeStr} | 📺 القناة: ${ev.channel || 'beIN Sports'} | 🎙️ المعلق: ${ev.commentary || ''}`,
+        url: `${this.mainUrl}/event/${ev.id}`,
       });
-    });
+    }
 
     return items;
   }
 
   async getMetaInternal(contentId: string, _type: StremioContentType): Promise<ProviderDetail | null> {
-    const fullUrl = this.fixUrl(contentId);
-    const resp = await http.get(fullUrl);
+    const events = await this.fetchEvents();
+    const event = events.find((e: any) => String(e.id) === contentId);
 
-    const title = resp.$('.EntryTitle').text().trim() || 'مباراة مباشرة';
-    const poster = this.fixUrl(resp.$('meta[property="og:image"]').attr('content') || resp.$('.teamlogo').attr('data-src'));
+    if (event) {
+      const t1 = event.team_1?.name || '';
+      const t2 = event.team_2?.name || '';
+      const champ = event.champions || '';
+      const timeStr = event.start_time
+        ? new Date(event.start_time * 1000).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
+        : '';
 
-    const descParts: string[] = [];
-    resp.$('.AY-MatchInfo table tr').each((_, tr) => {
-      const key = resp.$(tr).find('th').text().trim();
-      const val = resp.$(tr).find('td').text().trim();
-      if (key && val) descParts.push(`${key}: ${val}`);
-    });
+      return {
+        id: this.formatId(contentId),
+        provider: this.name,
+        type: 'tv',
+        title: `⚽ ${t1} vs ${t2}`,
+        poster: event.team_1?.logo || event.team_2?.logo,
+        description: `🏆 بطولة: ${champ}\n⏰ التوقيت: ${timeStr}\n📺 القناة: ${event.channel || 'beIN'}\n🎙️ المعلق: ${event.commentary || 'غير محدد'}`,
+        url: `${this.mainUrl}/event/${contentId}`,
+      };
+    }
 
     return {
       id: this.formatId(contentId),
       provider: this.name,
       type: 'tv',
-      title,
-      poster,
-      description: descParts.join('\n') || resp.$('.entry-content p').text().trim(),
-      url: fullUrl,
+      title: 'بث مباشر للمباراة',
+      description: 'شاهد البث المباشر بجودات متعددة',
+      url: `${this.mainUrl}/event/${contentId}`,
     };
   }
 
   async getStreamsInternal(contentId: string, _type: StremioContentType): Promise<ResolvedStream[]> {
-    const fullUrl = this.fixUrl(contentId);
-    const browserUa = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+    const resolved: ResolvedStream[] = [];
+    try {
+      const resp = await http.get(`${this.mainUrl}/event/${contentId}`, {
+        headers: { 'User-Agent': 'okhttp/4.12.0' },
+        timeout: 6000,
+      });
 
-    const resp = await http.get(fullUrl, {
-      headers: { 'User-Agent': browserUa, Referer: 'https://www.google.com/' },
-    });
+      if (resp.status === 200) {
+        const decrypted = decryptYacine(resp.text, resp.headers['t'] || '');
+        if (decrypted) {
+          const streams = JSON.parse(decrypted).data || [];
+          for (const stream of streams) {
+            let finalUrl = stream.url?.replace('www.elahmad.coo', 'www.elahmad.com') || '';
+            if (!finalUrl) continue;
 
-    const streams: ResolvedStream[] = [];
-    const iframeSrc = resp.$('.entry-content iframe').attr('src');
+            const streamHeaders: Record<string, string> = {
+              'User-Agent': stream.user_agent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+            };
 
-    if (iframeSrc) {
-      const playerUrl = this.fixUrl(iframeSrc);
-      try {
-        const playerResp = await http.get(playerUrl, {
-          headers: { 'User-Agent': browserUa, Referer: fullUrl },
-        });
+            if (stream.referer) {
+              streamHeaders['Referer'] = stream.referer;
+            }
 
-        const playerText = playerResp.text;
-        const albaMatch = playerText.match(/AlbaPlayerControl\('([^']+)'/);
-
-        if (albaMatch) {
-          const streamUrl = safeBase64Decode(albaMatch[1]);
-          if (streamUrl && streamUrl.startsWith('http')) {
-            streams.push({
-              name: 'SyriaLive (Alba Player)',
-              url: streamUrl,
+            resolved.push({
+              name: `سيرفر مباشر (${stream.name || 'HD'})`,
+              quality: stream.name || 'HD',
+              url: finalUrl,
               isM3u8: true,
-              headers: {
-                'User-Agent': browserUa,
-                Referer: playerUrl,
-                Origin: 'https://player.syria-player.live',
-              },
+              headers: streamHeaders,
             });
           }
         }
-
-        const clapprMatch = playerText.match(/source\s*:\s*"([^"]+)"/);
-        if (clapprMatch) {
-          streams.push({
-            name: 'SyriaLive (Clappr Player)',
-            url: clapprMatch[1],
-            isM3u8: true,
-            headers: { 'User-Agent': browserUa, Referer: playerUrl },
-          });
-        }
-      } catch (e) {
-        this.logger.debug(`Error fetching player iframe: ${(e as Error).message}`);
       }
+    } catch (e) {
+      this.logger.debug(`Error getting SyriaLive event streams: ${(e as Error).message}`);
     }
 
-    // Additional server buttons
-    const serverButtons: string[] = [];
-    resp.$('.video-serv a').each((_, a) => {
-      const href = resp.$(a).attr('href');
-      if (href) serverButtons.push(this.fixUrl(href));
-    });
-
-    for (const btn of serverButtons) {
-      const extracted = await extractStreams(btn, fullUrl);
-      streams.push(...extracted);
-    }
-
-    return streams;
+    return resolved;
   }
 }
+
