@@ -79,8 +79,9 @@ export class WecimaProvider extends BaseProvider {
   }
 
   async getCatalogInternal(type: StremioContentType, page: number = 1): Promise<ProviderItem[]> {
-    const path = type === 'series' ? 'episodes' : 'movies';
-    const url = page === 1 ? `${this.mainUrl}/${path}/` : `${this.mainUrl}/${path}/page/${page}/`;
+    const path = type === 'series' ? 'series' : 'movies';
+    // Use homepage on page 1 for reliable unblocked catalog
+    const url = page === 1 ? `${this.mainUrl}/` : `${this.mainUrl}/${path}/page/${page}/`;
     const resp = await http.get(url, {
       headers: {
         'User-Agent': MOBILE_USER_AGENT,
@@ -94,6 +95,10 @@ export class WecimaProvider extends BaseProvider {
       const title = resp.$(el).find('strong, h2, a').first().text().trim();
       const href = a.attr('href');
       if (!title || !href) return;
+
+      const isSeries = href.includes('series') || href.includes('مسلسل') || href.includes('season') || href.includes('episode');
+      if (type === 'series' && !isSeries && page === 1) return;
+      if (type === 'movie' && isSeries && page === 1) return;
 
       const posterSpan = resp.$(el).find('span.BG--GridItem');
       let poster = posterSpan.attr('data-src');
