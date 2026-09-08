@@ -11,7 +11,6 @@ export const stremioRouter = Router();
 stremioRouter.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'max-age=120, public');
   next();
 });
