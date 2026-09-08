@@ -1,11 +1,19 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';
+import dns from 'node:dns';
 import { createServer as createViteServer } from 'vite';
 import { stremioRouter } from './src/addon/router.js';
 import { registry } from './src/providers/index.js';
 import { StremioContentType } from './src/types/stremio.js';
 import { Logger } from './src/utils/logger.js';
+
+// Ensure IPv4 is resolved first to avoid cloud environment (Render/Docker) IPv6 hanging
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {
+  // Ignore if not supported
+}
 
 const logger = new Logger('Server');
 const PORT = 3000;
@@ -153,6 +161,35 @@ async function startServer() {
     }
   });
 
+  // Diagnostic endpoint to check upstream provider connectivity from host
+  app.get('/api/debug-fetch', async (req: Request, res: Response) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl) return res.status(400).json({ error: 'Missing url query parameter' });
+
+    try {
+      const resp = await fetch(targetUrl, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+      const text = await resp.text();
+      res.json({
+        url: targetUrl,
+        status: resp.status,
+        statusText: resp.statusText,
+        headers: Object.fromEntries(resp.headers.entries()),
+        preview: text.slice(0, 500),
+      });
+    } catch (err) {
+      res.status(500).json({
+        url: targetUrl,
+        error: (err as Error).message,
+      });
+    }
+  });
+
   // Stremio Addon Protocol Routes
   app.use('/', stremioRouter);
 
@@ -165,7 +202,9 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    // Serve static files with proper MIME types
+    app.use(express.static(distPath, { index: false }));
+    // Serve index.html for root and any non-API client routes
     app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
