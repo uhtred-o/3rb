@@ -160,6 +160,6 @@ export class AkwamProvider extends BaseProvider {
       }
     }
 
-    return streams;
+    return streams.filter(s => s.url && s.url.startsWith('http'));
   }
 }
